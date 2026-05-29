@@ -1,324 +1,477 @@
 from playwright.sync_api import sync_playwright
-import pandas as pd
-import time
+from datetime import timedelta
+import csv
 import hashlib
+import time
 
 
 URL = "https://www.seg-social.pt/ptss/sef/lista-devedores/consulta-lista-devedores?dswid=7612"
 
+CSV_FILE = "devedores_coletivos.csv"
+
 
 # =========================================================
-# Esperar AJAX
+# Wait for AJAX requests
 # =========================================================
-def esperar_ajax(page):
+def wait_for_ajax(page):
+    # Wait to finish main overlay
     try:
         page.wait_for_selector("#frawPageBlocker_blocker", state="hidden", timeout=30000)
-    except:
+    except Exception:
         pass
 
+    # Wait to finish second overlay
     try:
         page.wait_for_selector("#frawPageBlocker", state="hidden", timeout=30000)
-    except:
+    except Exception:
         pass
 
     page.wait_for_load_state("networkidle")
-    time.sleep(1.5)
+    time.sleep(1)
+
+# =========================================================
+# Generate table fingerprint
+# =========================================================
+def generate_table_fingerprint(page):
+
+    table_rows = page.locator("table tbody tr")
+
+    table_text = table_rows.all_inner_texts()
+
+    raw_content = "|".join(table_text)
+
+    return hashlib.md5(
+        raw_content.encode("utf-8")
+    ).hexdigest()
 
 
 # =========================================================
-# Extrair tabela
+# Extract table data
 # =========================================================
-def extrair_tabela(page):
-    tabela = page.locator("table")
+def extract_table_data(page):
 
-    headers = tabela.locator("thead tr th").all_inner_texts()
+    table = page.locator("table")
 
-    linhas = tabela.locator("tbody tr")
+    headers = table.locator(
+        "thead tr th"
+    ).all_inner_texts()
 
-    dados = []
+    table_rows = table.locator(
+        "tbody tr"
+    )
 
-    for i in range(linhas.count()):
-        row = linhas.nth(i)
-        cols = row.locator("td").all_inner_texts()
-        cols = [c.strip() for c in cols]
+    rows = []
 
-        if cols:
-            dados.append(cols)
+    for i in range(table_rows.count()):
+        row = table_rows.nth(i)
 
-    return headers, dados
+        columns = row.locator(
+            "td"
+        ).all_inner_texts()
+
+        columns = [column.strip() for column in columns]
+
+        if columns:
+            rows.append(columns)
+
+    return headers, rows
 
 
 # =========================================================
-# Fingerprint da tabela (detetar duplicação / falha AJAX)
+# Get entity type dropdown
 # =========================================================
-def fingerprint_tabela(page):
-    linhas = page.locator("table tbody tr")
-    texto = linhas.all_inner_texts()
-    raw = "|".join(texto)
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+def get_entity_dropdown(page):
 
-
-# =========================================================
-# Encontrar dropdown tipo entidade
-# =========================================================
-def obter_dropdown_tipo(page):
     selects = page.locator("select")
 
     for i in range(selects.count()):
-        s = selects.nth(i)
-        options = s.locator("option")
 
-        textos = [options.nth(j).inner_text().strip() for j in range(options.count())]
+        select = selects.nth(i)
 
-        if "Pessoas coletivas" in textos:
-            return s
+        options = select.locator("option")
+
+        option_texts = [
+            options.nth(j).inner_text().strip()
+            for j in range(options.count())
+        ]
+
+        if "Pessoas coletivas" in option_texts:
+            return select
 
     return None
 
 
 # =========================================================
-# Encontrar dropdown escalão
+# Get debt range dropdown
 # =========================================================
-def obter_dropdown_escalao(page):
+def get_debt_range_dropdown(page):
+
     selects = page.locator("select")
 
     for i in range(selects.count()):
-        s = selects.nth(i)
-        options = s.locator("option")
 
-        textos = [options.nth(j).inner_text().strip() for j in range(options.count())]
+        select = selects.nth(i)
 
-        if any("7500" in t or "1000000" in t for t in textos):
-            return s
+        options = select.locator("option")
+
+        option_texts = [
+            options.nth(j).inner_text().strip()
+            for j in range(options.count())
+        ]
+
+        if any(
+            "7500" in text or "1000000" in text
+            for text in option_texts
+        ):
+            return select
 
     return None
 
 
 # =========================================================
-# Obter escalões (VERSÃO FIÁVEL)
+# Fetch debt ranges
 # =========================================================
-def obter_escaloes_fiavel(page):
-    esperar_ajax(page)
+def get_debt_ranges(page):
 
-    dropdown = obter_dropdown_escalao(page)
+    wait_for_ajax(page)
+
+    dropdown = get_debt_range_dropdown(page)
 
     if dropdown is None:
-        raise Exception("Dropdown de escalões não encontrado.")
+        raise Exception("Debt range dropdown not found.")
 
     options = dropdown.locator("option")
 
-    escaloes = []
+    debt_ranges = []
 
     for i in range(options.count()):
-        texto = options.nth(i).inner_text().strip()
+        text = options.nth(i)\
+            .inner_text()\
+            .strip()
 
-        if texto and "selecion" not in texto.lower():
-            escaloes.append(texto)
+        if (text and "selecion" not in text.lower()):
+            debt_ranges.append(text)
 
-    # remove duplicados mantendo ordem
-    escaloes = list(dict.fromkeys(escaloes))
+    debt_ranges = list(
+        dict.fromkeys(debt_ranges)
+    )
 
-    print(f"[INFO] Escalões detetados: {len(escaloes)}")
-    return escaloes
+    return debt_ranges
 
 
 # =========================================================
-# Selecionar tipo coletiva
+# Select corporate entities
 # =========================================================
-def selecionar_coletiva(page):
-    print("A selecionar Pessoas coletivas...")
+def select_corporate_entities(page):
 
-    dropdown = obter_dropdown_tipo(page)
+    dropdown = get_entity_dropdown(page)
 
     if dropdown is None:
-        raise Exception("Dropdown tipo entidade não encontrado.")
+        raise Exception(
+            "Corporate entity dropdown not found."
+        )
 
-    dropdown.select_option(label="Pessoas coletivas")
-    esperar_ajax(page)
+    dropdown.select_option(
+        label="Pessoas coletivas"
+    )
 
-    print("OK")
+    wait_for_ajax(page)
 
 
 # =========================================================
-# Pesquisar
+# Select debt range
 # =========================================================
-def clicar_pesquisar(page):
-    for _ in range(5):
+def select_debt_range(page, debt_range):
+
+    dropdown = get_debt_range_dropdown(page)
+
+    if dropdown is None:
+        raise Exception(
+            "Debt range dropdown not found."
+        )
+
+    dropdown.select_option(
+        label=debt_range
+    )
+
+    wait_for_ajax(page)
+
+
+# =========================================================
+# Click search
+# =========================================================
+def click_search(page):
+
+    for attempt in range(5):
+
         try:
-            esperar_ajax(page)
-            page.get_by_text("Pesquisar").click(force=True)
+
+            wait_for_ajax(page)
+
+            page.get_by_text(
+                "Pesquisar"
+            ).click(force=True)
+
             break
+
         except:
+
             time.sleep(2)
 
-    esperar_ajax(page)
+    wait_for_ajax(page)
 
 
 # =========================================================
-# Alterar resultados por página
+# Ensure 50 results per page
 # =========================================================
-def alterar_resultados_por_pagina(page):
+def ensure_50_results_per_page(page):
+
     selects = page.locator("select")
 
     for i in range(selects.count()):
-        s = selects.nth(i)
-        options = s.locator("option")
 
-        textos = [options.nth(j).inner_text().strip() for j in range(options.count())]
+        select = selects.nth(i)
 
-        if "10" in textos and "25" in textos and "50" in textos:
-            try:
-                s.select_option("50")
-                esperar_ajax(page)
-                print("50 resultados ativado")
-                return
-            except:
-                pass
+        options = select.locator("option")
+
+        option_texts = [
+            options.nth(j).inner_text().strip()
+            for j in range(options.count())
+        ]
+
+        if (
+            "10" in option_texts
+            and
+            "25" in option_texts
+            and
+            "50" in option_texts
+        ):
+
+            current_value = select.input_value()
+
+            if current_value != "50":
+
+                print(
+                    "⚠ Results per page reset to 10. "
+                    "Restoring 50..."
+                )
+
+                try:
+
+                    select.select_option("50")
+
+                    wait_for_ajax(page)
+
+                except Exception as error:
+
+                    print(error)
+
+            return
 
 
 # =========================================================
-# Avançar página
+# Go to next page
 # =========================================================
-def avancar_pagina(page):
+def go_to_next_page(page):
+
     next_button = page.locator(
-        "a[aria-label='Next Page'], a.ui-paginator-next, .ui-paginator-next"
+        "a[aria-label='Next Page'], "
+        "a.ui-paginator-next, "
+        ".ui-paginator-next"
     )
 
     if next_button.count() == 0:
         return False
 
-    if "disabled" in (next_button.first.get_attribute("class") or ""):
+    classes = (
+        next_button.first.get_attribute(
+            "class"
+        ) or ""
+    )
+
+    if "disabled" in classes:
         return False
 
-    for _ in range(5):
+    for attempt in range(5):
+
         try:
-            esperar_ajax(page)
+            wait_for_ajax(page)
             next_button.first.click(force=True)
             break
         except:
             time.sleep(2)
 
-    esperar_ajax(page)
+    wait_for_ajax(page)
+
     return True
 
 
 # =========================================================
-# Selecionar escalão
+# Initialize CSV
 # =========================================================
-def selecionar_escalao(page, escalao):
-    dropdown = obter_dropdown_escalao(page)
+def initialize_csv(headers):
+    with open(
+        CSV_FILE,
+        "w",
+        newline="",
+        encoding="utf-8-sig"
+    ) as file:
 
-    if dropdown is None:
-        raise Exception("Dropdown escalão não encontrado.")
+        writer = csv.writer(file)
 
-    print(f"A selecionar: {escalao}")
-
-    dropdown.select_option(label=escalao)
-    esperar_ajax(page)
+        writer.writerow([
+            *headers,
+            "Tipo Entidade",
+            "EscalãoDívida"
+        ])
 
 
 # =========================================================
-# MAIN
+# Append rows to CSV
 # =========================================================
-with sync_playwright() as p:
+def append_rows_to_csv(rows,debt_range):
+    with open(
+        CSV_FILE,
+        "a",
+        newline="",
+        encoding="utf-8-sig"
+    ) as file:
 
-    browser = p.chromium.launch(headless=False)
+        writer = csv.writer(file)
+
+        for row in rows:
+
+            writer.writerow([
+                *row,
+                "Pessoa Coletiva",
+                debt_range
+            ])
+
+
+# =========================================================
+# Fetch initial debt ranges
+# =========================================================
+with sync_playwright() as playwright:
+    browser = playwright.chromium.launch(headless=True)
+
     page = browser.new_page()
-
-    print("A abrir site...")
     page.goto(URL, timeout=120000)
-    esperar_ajax(page)
 
-    selecionar_coletiva(page)
+    wait_for_ajax(page)
 
-    clicar_pesquisar(page)
+    select_corporate_entities(page)
 
-    escaloes = obter_escaloes_fiavel(page)
+    click_search(page)
 
-    print("\nEscalões encontrados:")
-    print(escaloes)
+    headers, _ = extract_table_data(page)
 
-    todos_dados = []
-    resultados_por_escalao = {}
+    initialize_csv(headers)
 
-    for escalao in escaloes:
-
-        print("\n" + "=" * 60)
-        print(f"ESCALÃO: {escalao}")
-        print("=" * 60)
-
-        selecionar_escalao(page, escalao)
-        clicar_pesquisar(page)
-        alterar_resultados_por_pagina(page)
-
-        pagina = 1
-        hashes = set()
-        dados_escalao = []
-
-        while True:
-
-            headers, dados = extrair_tabela(page)
-            fp = fingerprint_tabela(page)
-
-            # detetar loop ou falha AJAX
-            if fp in hashes:
-                print("⚠ Página repetida detetada (AJAX instável).")
-                break
-
-            hashes.add(fp)
-
-            for row in dados:
-                row.append("Pessoa Coletiva")
-                row.append(escalao)
-
-            dados_escalao.extend(dados)
-            todos_dados.extend(dados)
-
-            print(f"[{escalao}] Página {pagina} -> {len(dados)} linhas")
-
-            if not avancar_pagina(page):
-                break
-
-            pagina += 1
-
-        resultados_por_escalao[escalao] = len(dados_escalao)
-        print(f"[OK] {escalao}: {len(dados_escalao)} registos")
-
-    # =====================================================
-    # VALIDAÇÃO FINAL
-    # =====================================================
-    print("\n==============================")
-    print("VALIDAÇÃO FINAL")
-    print("==============================")
-
-    for esc, n in resultados_por_escalao.items():
-        print(f"{esc}: {n}")
-
-    faltam = [e for e, n in resultados_por_escalao.items() if n == 0]
-
-    if faltam:
-        print("\n⚠ Escalões sem dados:")
-        print(faltam)
-    else:
-        print("\n✅ Todos os escalões foram processados com sucesso.")
-
-    # =====================================================
-    # DATAFRAME FINAL
-    # =====================================================
-    headers.append("Tipo Entidade")
-    headers.append("Escalão Dívida")
-
-    df = pd.DataFrame(todos_dados, columns=headers)
-
-    print(df.head())
-    print(f"\nTotal registos: {len(df)}")
-
-    # =====================================================
-    # EXPORT
-    # =====================================================
-    df.to_csv("devedores_coletivos.csv", index=False, encoding="utf-8-sig")
-    df.to_excel("devedores_coletivos.xlsx", index=False)
-
-    print("\nFicheiros exportados com sucesso.")
+    debt_ranges = get_debt_ranges(page)
 
     browser.close()
+
+print(f"Debt Ranges Found: {debt_ranges}")
+
+
+# =========================================================
+# Main scraping loop
+# =========================================================
+total_start_time = time.time()
+
+for debt_range in debt_ranges:
+
+    range_start_time = time.time()
+
+    print("\n" + "=" * 60)
+    print(f"DEBT RANGE: {debt_range}")
+    print("=" * 60)
+
+    with sync_playwright() as playwright:
+
+        browser = playwright.chromium.launch(headless=True)
+
+        page = browser.new_page()
+        page.goto(URL, timeout=120000)
+
+        wait_for_ajax(page)
+
+        select_corporate_entities(page)
+
+        click_search(page)
+
+        select_debt_range(page, debt_range)
+
+        click_search(page)
+
+        page_number = 1
+
+        fingerprints = set()
+
+        while True:
+            page_start_time = time.time()
+
+            ensure_50_results_per_page(page)
+
+            headers, rows = extract_table_data(page)
+
+            fingerprint = generate_table_fingerprint(page)
+
+            # Prevent infinite AJAX loops
+            if fingerprint in fingerprints:
+                print("⚠ Duplicate page detected. Stopping pagination.")
+                break
+
+            fingerprints.add(fingerprint)
+
+            append_rows_to_csv(rows, debt_range)
+
+            page_runtime = time.time() - page_start_time
+
+            print(
+                f"[{debt_range}] "
+                f"Page {page_number} "
+                f"-> {len(rows)} rows "
+                f"({page_runtime:.2f}s)"
+            )
+
+            success = go_to_next_page(page)
+
+            if not success:
+                print("Reached last page.")
+                break
+
+            page_number += 1
+
+        range_runtime = time.time() - range_start_time
+
+        print(
+            f"\n✅ Debt range completed in "
+            f"{timedelta(seconds=int(range_runtime))}"
+        )
+
+        current_index = debt_ranges.index(debt_range) + 1
+
+        average_runtime = (
+            (time.time() - total_start_time)
+            / current_index
+        )
+
+        remaining_ranges = (
+            len(debt_ranges) - current_index
+        )
+
+
+        browser.close()
+
+
+total_runtime = time.time() - total_start_time
+
+print("\n✅ Scraping completed successfully.")
+
+print(
+    f"⏱ Total runtime: "
+    f"{timedelta(seconds=int(total_runtime))}"
+)
+
+print(f"CSV exported: {CSV_FILE}")
